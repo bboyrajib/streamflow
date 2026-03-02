@@ -1,0 +1,27 @@
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+  padding-bottom: 2rem;
+}
+
+.heroSkeleton {
+  height: 80vh;
+  min-height: 520px;
+  max-height: 800px;
+  position: relative;
+  overflow: hidden;
+}
+.heroSkBg {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+
+.carousels {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding-top: 0.5rem;
+}

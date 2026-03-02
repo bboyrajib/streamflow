@@ -66,6 +66,59 @@ function Install-NodeWindows {
     Refresh-Path
 }
 
+function Install-FFmpegWindows {
+    Write-Step "Installing FFmpeg"
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Info "Using winget"
+        winget install --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements --silent
+        Refresh-Path
+        return
+    }
+
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        Write-Info "Using Chocolatey"
+        choco install ffmpeg -y
+        Refresh-Path
+        return
+    }
+
+    Write-Warn "winget and choco not found -- downloading FFmpeg ZIP"
+
+    $arch = if ([System.Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
+    $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    $tmpZip = Join-Path $env:TEMP "ffmpeg.zip"
+    $installDir = "C:\ffmpeg"
+
+    Write-Info "Downloading FFmpeg..."
+    Invoke-WebRequest $zipUrl -OutFile $tmpZip -UseBasicParsing
+
+    Write-Info "Extracting..."
+    Expand-Archive $tmpZip -DestinationPath $env:TEMP -Force
+
+    $extracted = Get-ChildItem $env:TEMP -Directory | Where-Object { $_.Name -like "ffmpeg-*" } | Select-Object -First 1
+    if (-not $extracted) {
+        Write-Fail "Could not extract FFmpeg"
+    }
+
+    if (Test-Path $installDir) {
+        Remove-Item $installDir -Recurse -Force
+    }
+
+    Move-Item "$($extracted.FullName)" $installDir
+
+    $binPath = Join-Path $installDir "bin"
+    $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+
+    if ($machinePath -notlike "*$binPath*") {
+        Write-Info "Adding FFmpeg to PATH"
+        [System.Environment]::SetEnvironmentVariable("PATH", "$machinePath;$binPath", "Machine")
+    }
+
+    Remove-Item $tmpZip -ErrorAction SilentlyContinue
+    Refresh-Path
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -90,6 +143,21 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
 
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     Write-Fail "npm not found. Restart your terminal or reinstall Node.js."
+}
+
+# 1.5 FFmpeg
+Write-Step "Checking FFmpeg"
+if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Write-OK "FFmpeg available"
+} else {
+    Write-Warn "FFmpeg not found -- installing automatically"
+    Install-FFmpegWindows
+    Refresh-Path
+    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+        Write-OK "FFmpeg installed"
+    } else {
+        Write-Fail "FFmpeg installation failed. Install manually: https://ffmpeg.org"
+    }
 }
 
 # 2. Frontend

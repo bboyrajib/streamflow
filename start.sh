@@ -101,6 +101,67 @@ install_node_mac() {
     fi
 }
 
+install_ffmpeg_linux() {
+    step "Installing FFmpeg (Linux)"
+
+    if command -v apt-get &>/dev/null; then
+        info "Using apt (Debian/Ubuntu)"
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+    elif command -v dnf &>/dev/null; then
+        info "Using dnf (Fedora/RHEL)"
+        sudo dnf install -y ffmpeg
+    elif command -v yum &>/dev/null; then
+        info "Using yum (CentOS/RHEL)"
+        sudo yum install -y epel-release || true
+        sudo yum install -y ffmpeg
+    elif command -v pacman &>/dev/null; then
+        info "Using pacman (Arch)"
+        sudo pacman -Sy --noconfirm ffmpeg
+    elif command -v zypper &>/dev/null; then
+        info "Using zypper (openSUSE)"
+        sudo zypper install -y ffmpeg
+    else
+        warn "No known package manager found — installing static FFmpeg binary"
+
+        local ARCH_STR="amd64"
+        [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]] && ARCH_STR="arm64"
+
+        local URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ARCH_STR}-static.tar.xz"
+        local TMP="/tmp/ffmpeg-static.tar.xz"
+
+        info "Downloading static build..."
+        curl -fsSL "$URL" -o "$TMP"
+
+        tar -xf "$TMP" -C /tmp
+        local DIR
+        DIR=$(find /tmp -maxdepth 1 -type d -name "ffmpeg-*-static" | head -1)
+
+        sudo cp "$DIR/ffmpeg" /usr/local/bin/
+        sudo chmod +x /usr/local/bin/ffmpeg
+
+        rm -rf "$TMP" "$DIR"
+    fi
+}
+
+install_ffmpeg_mac() {
+    step "Installing FFmpeg (macOS)"
+
+    if command -v brew &>/dev/null; then
+        info "Using Homebrew"
+        brew install ffmpeg
+    else
+        warn "Homebrew not found — installing Homebrew then FFmpeg"
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        if [[ "$ARCH" == "arm64" ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        else
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+        brew install ffmpeg
+    fi
+}
+
 # ── 1. Ensure Node.js is installed ────────────────────────────────────────────
 step "Checking Node.js"
 if command -v node &>/dev/null; then
@@ -128,6 +189,27 @@ fi
 # Ensure npm is available (it ships with Node, but just in case)
 if ! command -v npm &>/dev/null; then
     fail "npm not found even after installing Node. Try: sudo npm install -g npm"
+fi
+
+# ── 1.5 Ensure FFmpeg is installed ──────────────────────────────────────────
+step "Checking FFmpeg"
+if command -v ffmpeg &>/dev/null; then
+    ok "FFmpeg available"
+else
+    warn "FFmpeg not found — installing automatically"
+    case "$OS" in
+        Linux*)  install_ffmpeg_linux ;;
+        Darwin*) install_ffmpeg_mac ;;
+        *)       fail "Unsupported OS: $OS — install FFmpeg manually from https://ffmpeg.org" ;;
+    esac
+
+    hash -r 2>/dev/null || true
+
+    if command -v ffmpeg &>/dev/null; then
+        ok "FFmpeg installed successfully"
+    else
+        fail "FFmpeg installation failed. Please install manually: https://ffmpeg.org"
+    fi
 fi
 
 # ── 2. Frontend install + build ───────────────────────────────────────────────

@@ -1,83 +1,93 @@
-.root {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
 
+.root { min-height: 100vh; display: flex; flex-direction: column; }
 .header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: rgba(8, 10, 15, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--border);
-}
-
-.headerInner {
-  max-width: 1400px;
-  margin: 0 auto;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 200;
+  transition: all 0.3s ease;
   padding: 0 2rem;
-  height: 64px;
+}
+.header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgba(6,8,16,0.95) 0%, transparent 100%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.header.scrolled::before { opacity: 1; }
+.headerInner {
+  max-width: 1600px;
+  margin: 0 auto;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 2rem;
 }
-
-.logo {
-  font-family: var(--font-display);
-  font-size: 1.35rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  transition: color var(--transition);
+.logo { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+.logoMark {
+  width: 32px; height: 32px;
+  background: var(--accent);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.75rem; color: white;
+  box-shadow: 0 0 20px var(--accent-glow);
 }
-
-.logo:hover { color: var(--accent); }
-
-.logoIcon {
-  color: var(--accent);
-  font-size: 1rem;
-  filter: drop-shadow(0 0 8px var(--accent-glow));
-}
-
-.nav {
-  display: flex;
-  gap: 0.25rem;
-}
-
+.logoText { font-family: var(--font-display); font-size: 1.5rem; letter-spacing: 0.08em; }
+.nav { display: flex; gap: 0.25rem; flex: 1; justify-content: center; }
 .navLink {
-  padding: 0.4rem 1rem;
-  border-radius: var(--radius-sm);
+  padding: 0.45rem 1.1rem;
+  border-radius: 99px;
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--text-dim);
   transition: all var(--transition);
 }
-
-.navLink:hover {
-  color: var(--text);
-  background: var(--bg-3);
+.navLink:hover { color: var(--text); }
+.navLink.active { color: var(--text); background: rgba(255,255,255,0.08); }
+.actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+.iconBtn {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  color: var(--text-dim);
+  transition: all var(--transition);
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
 }
-
-.navLink.active {
-  color: var(--accent);
-  background: var(--accent-dim);
+.iconBtn:hover { color: var(--text); background: rgba(255,255,255,0.08); border-color: var(--border-hover); }
+.searchForm { display: flex; align-items: center; gap: 0.5rem; animation: fadeInScale 0.2s ease; }
+.searchInput {
+  width: 280px; height: 40px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 99px;
+  padding: 0 1rem;
+  font-size: 0.875rem; color: var(--text);
+  outline: none;
+  transition: all var(--transition);
 }
-
-.main {
-  flex: 1;
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 2rem;
-  width: 100%;
+.searchInput::placeholder { color: var(--muted); }
+.searchInput:focus { border-color: var(--accent); background: rgba(255,255,255,0.09); }
+.searchBtn, .closeBtn {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  color: var(--text-dim);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem;
+  transition: all var(--transition);
 }
-
+.searchBtn:hover, .closeBtn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+.main { flex: 1; padding-top: 72px; }
+.footer { border-top: 1px solid var(--border); padding: 1.5rem 2rem; margin-top: 4rem; }
+.footerInner { max-width: 1600px; margin: 0 auto; display: flex; align-items: center; gap: 2rem; }
+.footerLogo { font-family: var(--font-display); letter-spacing: 0.1em; color: var(--muted); font-size: 0.9rem; }
+.footerText, .footerDisco { font-size: 0.75rem; color: var(--muted); }
+.footerDisco { margin-left: auto; }
 @media (max-width: 768px) {
-  .headerInner { padding: 0 1rem; }
-  .main { padding: 1rem; }
-  .logo { font-size: 1.1rem; }
+  .header { padding: 0 1rem; }
+  .nav { display: none; }
+  .searchInput { width: 200px; }
 }
