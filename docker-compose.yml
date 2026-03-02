@@ -1,0 +1,30 @@
+version: "3.9"
+
+# One service. No database. No Python.
+# - In dev: run `npm run dev` in frontend/, and `node server.js` in streamer/
+# - In prod: build frontend (`npm run build`), copy dist/ to streamer/public/, run server.js
+
+services:
+  server:
+    build: ./streamer
+    ports:
+      - "9090:9090"
+    environment:
+      PORT: 9090
+      ALLOWED_ORIGINS: "*"
+    restart: unless-stopped
+
+  # Dev-only frontend with HMR. Remove in production.
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run dev -- --host"
+    depends_on:
+      - server
+
+volumes: {}
