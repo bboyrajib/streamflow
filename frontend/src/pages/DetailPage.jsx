@@ -263,7 +263,7 @@ export default function DetailPage() {
     setShowTorrents(true)
     setTorrents([])
     setTorrentsLoading(true)
-    searchTorrents(query, { limit: 50, perProvider: 20, sort: 'health' })
+    searchTorrents(query, { limit: 50, perProvider: 20, sort: 'health', imdbId: mediaMeta?.imdbId || null })
       .then(d => setTorrents(d.results || []))
       .catch(() => {})
       .finally(() => setTorrentsLoading(false))

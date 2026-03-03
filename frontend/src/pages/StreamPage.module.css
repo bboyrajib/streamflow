@@ -243,7 +243,7 @@
   flex-direction: column;
   background: var(--bg-1);
   border-left: 1px solid var(--border);
-  height: calc(100vh - 72px - 56px);
+  /* height: calc(100vh - 72px - 56px); */
   position: sticky;
   top: calc(72px + 56px);
   overflow: hidden;
@@ -474,6 +474,167 @@
   flex-shrink: 0;
 }
 .subUploadBtn:hover { color: var(--text); border-color: var(--border-hover); background: rgba(255,255,255,0.1); }
+.subControls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  position: relative;
+}
+
+/* CC Button */
+.subToggleBtn {
+  height: 30px;
+  padding: 0 0.75rem;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  backdrop-filter: blur(6px);
+
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.subToggleBtn:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.1);
+}
+
+.subActive {
+  color: white !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+
+/* Dropdown */
+.subDropdownWrapper {
+  position: relative;
+  width: 220px;
+}
+
+.subSelectTrigger {
+  width: 100%;
+  height: 30px;
+  padding: 0 0.8rem;
+  border-radius: 8px;
+
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--text);
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  font-size: 0.75rem;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: all 0.2s ease;
+}
+
+.subSelectTrigger:hover {
+  background: rgba(255,255,255,0.1);
+}
+
+.subTriggerLabel {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arrow {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgba(255,255,255,0.6);
+  border-bottom: 2px solid rgba(255,255,255,0.6);
+  transform: rotate(45deg);
+  transition: transform 0.2s ease;
+}
+
+.arrowOpen {
+  transform: rotate(-135deg);
+}
+
+.subDropdown {
+  position: absolute;
+  bottom: 38px;
+  left: 0;
+  width: 100%;
+
+  background: #0f172a;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+
+  box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 999;
+  animation: fadeIn 0.15s ease;
+}
+
+.subOption {
+  padding: 8px 12px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s ease;
+}
+
+.subOption:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.subGroupLabel {
+  padding: 6px 12px;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  opacity: 0.5;
+  letter-spacing: 0.08em;
+}
+
+.extSubsError {
+  font-size: 0.85rem;
+  color: #ff5d5d;
+  margin-left: 0.2rem;
+}
+
+.subUploadBtn {
+  height: 30px;
+  width: 30px;
+  border-radius: 8px;
+
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-dim);
+
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.subUploadBtn:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.12);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 /* Audio track */
 .audioTrackWrap {
@@ -679,10 +840,730 @@
   flex-shrink: 0;
 }
 
+.topBar {
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+.topBarHidden {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateY(-6px);
+}
 
+/* ── Top-bar inline torrent stats ──────────────────────────────────────────── */
+/* Sits between the title and the Files button. Rendered as light, subdued text
+   so it doesn't fight the title for attention. */
+.topStats {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;           /* push toward the right */
+  flex-shrink: 0;
+  opacity: 0.55;               /* deliberately dim — it's supporting info */
+  transition: opacity var(--transition);
+}
+.topStats:hover { opacity: 0.85; }
+
+.topStat {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+.topStatIcon {
+  font-size: 0.6rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+.topStatLabel {
+  font-size: 0.6rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.topStatVal {
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.topStatHighlight {
+  color: var(--cyan) !important;
+}
+.topStatSep {
+  color: var(--border);
+  font-size: 0.7rem;
+  line-height: 1;
+  user-select: none;
+}
+
+/* Hide on very small screens */
+@media (max-width: 640px) { .topStats { display: none; } }
+
+/* ── Controls auto-hide ────────────────────────────────────────────────────── */
+.controlsHidden {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+/* statsBar already has a transition in the original; extend it */
+.statsBar {
+  transition: opacity 0.35s ease;
+}
+
+/* ── Custom scrubber ───────────────────────────────────────────────────────── */
+/* Sits above the statsRow. Replaces the thin progressTrack during playback. */
+.scrubberWrap {
+  position: relative;
+  height: 20px;          /* tall hit zone so hover is easy */
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  margin-bottom: 0.3rem;
+  /* overflow visible so the tooltip can poke out above */
+}
+
+/* The actual thin track */
+.scrubTrack {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 99px;
+  overflow: visible;
+  transition: height 0.15s ease;
+}
+.scrubberWrap:hover .scrubTrack { height: 6px; }
+
+/* Buffered (darkish white fill) */
+.scrubBuffered {
+  position: absolute;
+  left: 0; top: 0; height: 100%;
+  background: rgba(255,255,255,0.22);
+  border-radius: 99px;
+  pointer-events: none;
+  transition: width 0.4s linear;
+}
+
+/* Ghost / hover preview (semi-transparent accent) */
+.scrubGhost {
+  position: absolute;
+  left: 0; top: 0; height: 100%;
+  background: rgba(0,212,255,0.25);
+  border-radius: 99px;
+  pointer-events: none;
+}
+
+/* Played (gradient accent) */
+.scrubPlayed {
+  position: absolute;
+  left: 0; top: 0; height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  border-radius: 99px;
+  pointer-events: none;
+  transition: width 0.1s linear;
+}
+
+/* Thumb dot */
+.scrubThumb {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px; height: 12px;
+  background: white;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px rgba(0,212,255,0.4);
+  opacity: 0;
+  transition: opacity 0.15s, left 0.1s linear;
+}
+.scrubberWrap:hover .scrubThumb { opacity: 1; }
+
+/* FIX #2: Time tooltip — positioned relative to .scrubberWrap (position:relative)
+   so `left` is element-relative, not page-relative. translateX(-50%) centers it
+   on the cursor. Clamped in JS to [24px, width-24px] so it never overflows. */
+.scrubTooltip {
+  position: absolute;
+  bottom: calc(100% + 4px);   /* sits just above the scrubber */
+  transform: translateX(-50%);
+  background: rgba(10, 12, 22, 0.92);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 5px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 20;
+  backdrop-filter: blur(4px);
+}
+
+/* ── Playback controls cluster (play, skip, volume, time) ──────────────────── */
+.playbackControls {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.playBtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: white;
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition);
+}
+.playBtn:hover { background: rgba(255,255,255,0.18); transform: scale(1.07); }
+
+.skipBtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.55);
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition);
+}
+.skipBtn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+
+/* Volume */
+.volumeGroup {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.volumeSlider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 64px;
+  height: 3px;
+  border-radius: 99px;
+  outline: none;
+  cursor: pointer;
+  /* Fill left side to --vol-pct with accent, right side dim */
+  background: linear-gradient(
+    to right,
+    var(--cyan) 0%,
+    var(--cyan) var(--vol-pct, 100%),
+    rgba(255,255,255,0.18) var(--vol-pct, 100%),
+    rgba(255,255,255,0.18) 100%
+  );
+}
+.volumeSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+}
+.volumeSlider::-moz-range-thumb {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: white;
+  border: none;
+  cursor: pointer;
+}
+
+/* Time readout */
+.timeDisplay {
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  margin-left: 0.35rem;
+}
+.timeSep { color: var(--muted); margin: 0 0.2rem; }
+
+/* Fullscreen button */
+.fsBtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.6);
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+}
+.fsBtn:hover { background: rgba(255,255,255,0.12); color: var(--text); }
+
+.subSelect {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subControls {
+  position: relative;
+  z-index: 100;
+}
+
+.subSelect option {
+  background: #111827;
+  color: white;
+}
+
+
+/* ── Outer wrapper — sits below the controls bar ── */
+.extractPanel {
+  width: 100%;
+  background: rgba(10, 10, 15, 0.85);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+}
+
+/* ── Collapsed header / toggle button ── */
+.extractToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s, background 0.15s;
+  user-select: none;
+}
+
+.extractToggle:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.extractToggleOpen {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.extractIcon {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
+
+.extractBadge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.03em;
+}
+
+/* ── Arrow chevron (reuse .arrow / .arrowOpen if already defined, or define here) ── */
+/* If .arrow and .arrowOpen are already in your CSS, skip these: */
+.arrow {
+  margin-left: auto;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid rgba(255, 255, 255, 0.4);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.arrowOpen {
+  transform: rotate(180deg);
+}
+
+/* ── Expanded body ── */
+.extractBody {
+  padding: 4px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: extractFadeIn 0.15s ease;
+}
+
+@keyframes extractFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Status / loading row ── */
+.extractStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.8rem;
+  padding: 6px 0;
+}
+
+/* ── Error box ── */
+.extractError {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: rgba(220, 60, 60, 0.15);
+  border: 1px solid rgba(220, 60, 60, 0.3);
+  border-radius: 6px;
+  color: #f87171;
+  font-size: 0.8rem;
+}
+
+.extractError small {
+  opacity: 0.75;
+  font-size: 0.72rem;
+}
+
+/* ── Section (Audio / Subtitle) ── */
+.extractSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.extractSectionTitle {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.35);
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Individual stream row ── */
+.extractStreamRow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  transition: background 0.1s;
+}
+
+.extractStreamRow:hover {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+/* ── Stream info line (badge + label) ── */
+.extractStreamInfo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.extractStreamBadge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+}
+
+.extractStreamLabel {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.65);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Format buttons row ── */
+.extractFmtRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+/* ── Individual format download button ── */
+.extractFmtBtn {
+  padding: 3px 9px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, transform 0.1s;
+  letter-spacing: 0.02em;
+}
+
+.extractFmtBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.extractFmtBtn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.extractFmtBtn:disabled,
+.extractFmtBusy {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── "Use in player" subtitle button ── */
+.extractUseBtn {
+  padding: 3px 9px;
+  background: rgba(99, 179, 237, 0.12);
+  border: 1px solid rgba(99, 179, 237, 0.25);
+  border-radius: 5px;
+  color: #7ec8e3;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.1s;
+  white-space: nowrap;
+}
+
+.extractUseBtn:hover {
+  background: rgba(99, 179, 237, 0.22);
+  transform: translateY(-1px);
+}
+
+.extractUseBtn:active {
+  transform: translateY(0);
+}
+
+/* ── Empty state ── */
+.extractEmpty {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.3);
+  padding: 4px 0;
+  font-style: italic;
+}
+
+/* ── Hint row at the bottom of the expanded panel ── */
+.extractHint {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.28);
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  line-height: 1.4;
+}
+
+.extractHint b {
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 600;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   CSS ADDITIONS — append these to your StreamPage.module.css
+   Covers: unified track dropdown, audio trigger, subtitle badge styles,
+   and the shared dropArrow chevron used by both dropdowns.
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* ── Shared chevron arrow (used by both audio and subtitle triggers) ── */
+.dropArrow {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid rgba(255, 255, 255, 0.35);
+  transition: transform 0.18s ease;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+.dropArrowOpen {
+  transform: rotate(180deg);
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   AUDIO TRACK DROPDOWN
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* Wrapper — relative so dropdown anchors to it */
+.trackDropdownWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+/* Trigger button */
+.trackTriggerBtn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 7px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+  max-width: 130px;
+}
+.trackTriggerBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.trackTriggerOpen {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.trackTriggerLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 90px;
+}
+
+/* Shared dropdown panel (used by audio dropdown) */
+.trackDropdown {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 200px;
+  max-width: 280px;
+  background: rgba(18, 18, 24, 0.97);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  z-index: 200;
+  animation: dropIn 0.12s ease;
+}
+
+@keyframes dropIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Group label inside dropdown */
+.trackGroupLabel {
+  padding: 6px 12px 3px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.28);
+}
+
+/* Individual option row */
+.trackOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 7px 26px; /* left-pad leaves room for the checkmark */
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trackOption:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #fff;
+}
+.trackOptionActive {
+  color: #fff;
+  padding-left: 10px; /* reset to fit checkmark */
+}
+
+/* Checkmark for the active option */
+.trackCheck {
+  font-size: 0.7rem;
+  color: #60a5fa;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+/* Small hint line at the bottom of a section */
+.trackHint {
+  padding: 4px 12px 8px;
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.25);
+  font-style: italic;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   SUBTITLE DROPDOWN — additions / overrides
+   (Most subtitle styles already exist; these add the missing pieces.)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/* Make the subtitle dropdown also use the shared dropArrow — if your existing
+   .arrow / .arrowOpen classes conflict, replace them with .dropArrow / .dropArrowOpen
+   in the JSX (already done in the updated StreamPage.jsx above). */
+
+/* Active option highlight */
+.subOptionActive {
+  color: #fff !important;
+  padding-left: 10px !important;
+}
+
+/* Dimmed "no subtitles found" / loading line */
+.subOptionDim {
+  padding: 8px 12px;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.3);
+  font-style: italic;
+}
+
+/* Truncated subtitle title text */
+.subOptionText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* HI / trusted badges inside subtitle options */
+.subBadge {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 0.04em;
+  margin-left: 3px;
+}
+.subBadgeTrusted {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: #86efac;
+  margin-left: 3px;
+}
 @media (max-width: 768px) {
   .topBar { padding: 0.75rem 1rem; }
   .titleText { font-size: 0.9rem; }
   .playerBox { height: 40vh; max-height: 40vh; }
   .statsRow { gap: 0.75rem; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }

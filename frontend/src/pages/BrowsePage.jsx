@@ -80,7 +80,7 @@ export default function BrowsePage() {
   return (
     <div className={styles.page}>
       <div className={styles.pageTop}>
-        <div className={styles.typeSwitch}>
+        {/* <div className={styles.typeSwitch}>
           <button
             className={`${styles.typeBtn} ${type === 'movie' ? styles.typeActive : ''}`}
             onClick={() => navigate('/browse/movie')}
@@ -89,7 +89,7 @@ export default function BrowsePage() {
             className={`${styles.typeBtn} ${type === 'tv' ? styles.typeActive : ''}`}
             onClick={() => navigate('/browse/tv')}
           >📺 TV Shows</button>
-        </div>
+        </div> */}
         <h1 className={styles.pageTitle}>{type === 'tv' ? 'TV Shows' : 'Movies'}</h1>
       </div>
 

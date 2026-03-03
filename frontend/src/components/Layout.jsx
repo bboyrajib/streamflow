@@ -35,7 +35,7 @@ export default function Layout() {
         <div className={styles.headerInner}>
           <NavLink to="/" className={styles.logo}>
             <span className={styles.logoMark}>▶</span>
-            <span className={styles.logoText}>CINEFLOW</span>
+            <span className={styles.logoText}>STREAMFLOW</span>
           </NavLink>
 
           <nav className={styles.nav}>
@@ -82,7 +82,7 @@ export default function Layout() {
 
       <footer className={styles.footer}>
         <div className={styles.footerInner}>
-          <span className={styles.footerLogo}>CINEFLOW</span>
+          <span className={styles.footerLogo}>STREAMFLOW</span>
           <span className={styles.footerText}>Powered by WebTorrent · TMDB</span>
           <span className={styles.footerDisco}>For educational purposes only</span>
         </div>

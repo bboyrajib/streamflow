@@ -13,8 +13,9 @@ export async function searchTMDB(q, { type = 'multi', page = 1, year = null } = 
 // ── Torrent Search ─────────────────────────────────────────────────────────────
 // Returns raw torrents from all providers with provider tags — no TMDB enrichment
 // query: intelligently constructed string (title + year + quality hints)
-export async function searchTorrents(query, { limit = 50, perProvider = 20, sort = 'health', page = 1 } = {}) {
+export async function searchTorrents(query, { limit = 50, perProvider = 20, sort = 'health', page = 1, imdbId = null } = {}) {
   const params = new URLSearchParams({ q: query, limit, per_provider: perProvider, sort, page })
+  if (imdbId) params.set('imdb_id', imdbId)
   const res = await fetch(`/api/search/torrents?${params}`)
   if (!res.ok) throw new Error((await res.json()).error || 'Torrent search failed')
   return res.json()

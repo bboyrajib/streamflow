@@ -221,6 +221,8 @@
 .magnetStreamBtn:hover:not(:disabled) { background: var(--accent-bright); }
 .magnetStreamBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+
+
 @media (max-width: 768px) {
   .page { padding: 1.25rem 1rem 3rem; }
 }

@@ -85,18 +85,18 @@ export default function HeroCarousel({ items = [], onPlay }) {
           <div className={styles.actions}>
             <button
               className={styles.playBtn}
-              onClick={() => onPlay?.(item)}
+              onClick={() => navigate(`/title/${item.mediaType || 'movie'}/${item.tmdbId}`)}
             >
               <span className={styles.playIcon}>▶</span>
               Stream Now
             </button>
-            <button
+            {/* <button
               className={styles.infoBtn}
               onClick={() => navigate(`/title/${item.mediaType || 'movie'}/${item.tmdbId}`)}
             >
               <span>ⓘ</span>
               More Info
-            </button>
+            </button> */}
             {item.trailer && (
               <a
                 href={item.trailer}

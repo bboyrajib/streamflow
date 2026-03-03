@@ -15,61 +15,17 @@ const MAX_TORRENTS = 5
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HLS TRANSCODING
-//
-// SEEKING FIX — what was broken and why:
-//
-//   OLD (broken):
-//     -hls_flags append_list+delete_segments
-//
-//   PROBLEMS:
-//     1. `delete_segments` — FFmpeg deletes old .ts files after ~5 segments.
-//        Seeking backwards tries to fetch a segment that no longer exists → 404.
-//     2. `append_list` — tells FFmpeg to keep writing to the playlist without
-//        ever writing #EXT-X-ENDLIST. hls.js sees this as a LIVE stream.
-//        Live streams auto-seek to the "live edge" and disable the seek bar.
-//
-//   NEW (fixed):
-//     -hls_flags independent_segments
-//
-//     `independent_segments` — each .ts can be decoded independently (good for
-//     random access). No `delete_segments` means all .ts files stay on disk.
-//     No `append_list` means once FFmpeg finishes, it writes #EXT-X-ENDLIST
-//     and hls.js switches the stream from LIVE → VOD with full seek support.
-//
-//   DISK USAGE NOTE:
-//     Without delete_segments, disk usage grows with file size.
-//     A 2-hour 1080p MKV at 4s segments ≈ 1800 segments × ~3MB = ~5.4GB peak.
-//     The HLS_TTL (10 min inactivity) still cleans up the entire session dir.
-//     For storage-constrained environments, consider a smaller HLS_SEG_TIME
-//     or re-enabling delete_segments and accepting that backward seeks > ~20s
-//     will stall until segments re-download (they won't, they're gone).
-//
-// FFMPEG FLAGS EXPLAINED:
-//   -c:v copy                       → passthrough video (no CPU cost)
-//   -c:a aac                        → transcode audio to AAC (fixes AC3/DTS)
-//   -b:a 192k                       → audio bitrate
-//   -ac 2                           → downmix to stereo
-//   -hls_time 4                     → 4-second segments
-//   -hls_list_size 0                → keep ALL segments listed in playlist
-//   -hls_flags independent_segments → each .ts is self-contained (no delete!)
-//   -hls_segment_type mpegts        → .ts container
-//   -start_number 0                 → segments start at seg00000.ts
-//
-// REQUIREMENTS:
-//   ffmpeg must be installed and in PATH.
-//   Windows: choco install ffmpeg  |  macOS: brew install ffmpeg  |  Linux: apt install ffmpeg
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 import { spawn } from 'child_process'
-import { mkdirSync, existsSync, rmSync } from 'fs'
+import { mkdirSync, existsSync, rmSync, createWriteStream } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
 const HLS_BASE_DIR  = join(tmpdir(), 'torrent-hls')
-const HLS_TTL       = 10 * 60 * 1000  // clean up session after 10 min inactivity
-const HLS_SEG_TIME  = 4               // seconds per segment
+const HLS_TTL       = 10 * 60 * 1000
+const HLS_SEG_TIME  = 4
 
-// Active HLS sessions: key = `${infoHash}:${fileIndex}`
 const hlsSessions = new Map()
 
 mkdirSync(HLS_BASE_DIR, { recursive: true })
@@ -132,32 +88,118 @@ async function getOrStartHlsSession(infoHash, fileIndex) {
     error: null,
     readyCallbacks: [],
     playlistPath: join(dir, 'stream.m3u8'),
+    audioStreams: [],   // filled after probe, used by master.m3u8 route
   }
   hlsSessions.set(key, session)
 
-  const ffmpegArgs = [
-    '-loglevel', 'warning',
-    '-i', 'pipe:0',
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-ac', '2',
-    '-hls_time', String(HLS_SEG_TIME),
-    '-hls_list_size', '0',
-    // ── SEEKING FIX ──────────────────────────────────────────────────────────
-    // `independent_segments` only — no delete_segments (would remove .ts files
-    // needed for backward seeks) and no append_list (would make hls.js think
-    // this is a live stream and auto-seek to the live edge / hide seek bar).
-    // Once FFmpeg finishes, it writes #EXT-X-ENDLIST → hls.js treats as VOD.
-    // ─────────────────────────────────────────────────────────────────────────
-    '-hls_flags', 'independent_segments',
-    '-hls_segment_type', 'mpegts',
-    '-hls_segment_filename', join(dir, 'seg%05d.ts'),
-    '-start_number', '0',
-    join(dir, 'stream.m3u8'),
-  ]
+  // ── Probe audio streams so we can map each one into HLS individually ──────
+  // We need a second read of the file just for probing. probeFile() opens its
+  // own createReadStream(), which is fine — WebTorrent supports concurrent reads.
+  // If probing fails (e.g. torrent not seeded enough yet) we fall back to the
+  // safe single-track behaviour so playback is never blocked.
+  let audioStreams = []
+  try {
+    const probed = await probeFile(file)
+    audioStreams = probed.filter(s => s.type === 'audio')
+    session.audioStreams = audioStreams
+    console.log(`[hls] probe found ${audioStreams.length} audio stream(s) for "${file.name}"`)
+  } catch (e) {
+    console.warn(`[hls] probe failed, using single audio fallback: ${e.message}`)
+  }
 
-  console.log(`[hls] starting session ${key} for "${file.name}"`)
+  // ── Build ffmpeg args ─────────────────────────────────────────────────────
+  //
+  // SINGLE audio stream (or probe failed):
+  //   Standard behaviour — transcode to AAC stereo, one track in the manifest.
+  //
+  // MULTIPLE audio streams:
+  //   Map each audio stream to its own output stream (-map 0:v -map 0:a:0 -map 0:a:1 …).
+  //   Transcode every audio stream to AAC stereo independently.
+  //   Name each output audio stream via -metadata:s:a:<i> so hls.js can label it.
+  //   Use a single .m3u8 / .ts output — mpegts supports multiple audio PIDs in
+  //   one TS file, and hls.js exposes them as switchable audio tracks automatically.
+  //
+  // NOTE: We intentionally use a single-file HLS output (not per-rendition).
+  // Per-rendition (separate .m3u8 per audio group) requires ffmpeg to write
+  // multiple files from one pass, which is complex with pipe:0 input. The
+  // single-TS approach is simpler and hls.js handles it perfectly.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Build ffmpeg args ─────────────────────────────────────────────────────
+  //
+  // SINGLE audio:  one output — video+audio in stream.m3u8 / seg%05d.ts
+  //
+  // MULTIPLE audio: one output per audio track using ffmpeg's multi-output mode.
+  //   Output 0  →  video + audio track 0  →  stream.m3u8  / seg%05d.ts
+  //   Output 1  →  audio track 1 only     →  audio1.m3u8  / audio1/seg%05d.ts
+  //   Output 2  →  audio track 2 only     →  audio2.m3u8  / audio2/seg%05d.ts
+  //   ...
+  //
+  // The master manifest then uses EXT-X-MEDIA pointing at audio1.m3u8 etc,
+  // and EXT-X-STREAM-INF points at stream.m3u8 which carries audio track 0.
+  // hls.js switches by reloading the correct audio playlist — this is the
+  // standard HLS multi-audio approach and works reliably in hls.js.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const multiAudio = audioStreams.length > 1
+
+  // Create subdirs for extra audio tracks
+  if (multiAudio) {
+    for (let i = 1; i < audioStreams.length; i++) {
+      mkdirSync(join(dir, `audio${i}`), { recursive: true })
+    }
+  }
+
+  const ffmpegArgs = ['-loglevel', 'warning', '-i', 'pipe:0']
+
+  if (multiAudio) {
+    // ── Output 0: video + first audio track ───────────────────────────────
+    ffmpegArgs.push('-map', '0:v:0', '-map', '0:a:0')
+    ffmpegArgs.push('-c:v', 'copy', '-c:a:0', 'aac', '-b:a:0', '192k', '-ac:a:0', '2')
+    const s0 = audioStreams[0]
+    if (s0.language) ffmpegArgs.push('-metadata:s:a:0', `language=${s0.language}`)
+    if (s0.title)    ffmpegArgs.push('-metadata:s:a:0', `title=${s0.title}`)
+    ffmpegArgs.push(
+      '-hls_time', String(HLS_SEG_TIME),
+      '-hls_list_size', '0',
+      '-hls_flags', 'independent_segments',
+      '-hls_segment_type', 'mpegts',
+      '-hls_segment_filename', join(dir, 'seg%05d.ts'),
+      '-start_number', '0',
+      join(dir, 'stream.m3u8'),
+    )
+    // ── Outputs 1…N: audio-only tracks ────────────────────────────────────
+    for (let i = 1; i < audioStreams.length; i++) {
+      const s = audioStreams[i]
+      ffmpegArgs.push('-map', `0:a:${i}`)
+      ffmpegArgs.push(`-c:a:0`, 'aac', `-b:a:0`, '192k', `-ac:a:0`, '2')
+      if (s.language) ffmpegArgs.push('-metadata:s:a:0', `language=${s.language}`)
+      if (s.title)    ffmpegArgs.push('-metadata:s:a:0', `title=${s.title}`)
+      ffmpegArgs.push(
+        '-hls_time', String(HLS_SEG_TIME),
+        '-hls_list_size', '0',
+        '-hls_flags', 'independent_segments',
+        '-hls_segment_type', 'mpegts',
+        '-hls_segment_filename', join(dir, `audio${i}`, 'seg%05d.ts'),
+        '-start_number', '0',
+        join(dir, `audio${i}.m3u8`),
+      )
+    }
+  } else {
+    // Single audio — original simple behaviour
+    ffmpegArgs.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ac', '2')
+    ffmpegArgs.push(
+      '-hls_time', String(HLS_SEG_TIME),
+      '-hls_list_size', '0',
+      '-hls_flags', 'independent_segments',
+      '-hls_segment_type', 'mpegts',
+      '-hls_segment_filename', join(dir, 'seg%05d.ts'),
+      '-start_number', '0',
+      join(dir, 'stream.m3u8'),
+    )
+  }
+
+  console.log(`[hls] starting session ${key} for "${file.name}" (${audioStreams.length || 1} audio track(s))`)
   const ff = spawn('ffmpeg', ffmpegArgs, { stdio: ['pipe', 'ignore', 'pipe'] })
   session.ffmpeg = ff
 
@@ -198,7 +240,6 @@ async function getOrStartHlsSession(infoHash, fileIndex) {
       session.readyCallbacks.forEach(cb => cb.resolve())
       session.readyCallbacks = []
     }
-    // FFmpeg done → #EXT-X-ENDLIST is written → hls.js promotes stream to VOD
     console.log(`[hls] transcoding complete for ${key} — stream is now full VOD`)
   })
 
@@ -232,6 +273,135 @@ async function getOrStartHlsSession(infoHash, fileIndex) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUDIO / SUBTITLE EXTRACTION
+//
+// These helpers probe a torrent file with `ffprobe` to list all embedded
+// streams, then use `ffmpeg` to extract a chosen stream on-the-fly and pipe
+// the bytes back to the client.
+//
+// NEW ENDPOINTS:
+//   GET /api/probe?infoHash=&file=
+//       → { streams: [{ index, type, codec, language, title, default, forced }] }
+//
+//   GET /api/extract/audio?infoHash=&file=&stream=&format=
+//       format: aac (default) | mp3 | flac | opus | wav
+//       → streaming audio file
+//
+//   GET /api/extract/subtitle?infoHash=&file=&stream=&format=
+//       format: srt (default) | vtt | ass
+//       → subtitle text file
+//
+// REQUIREMENTS: ffmpeg + ffprobe in PATH (same requirement as HLS)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Probe a torrent file for all streams using ffprobe.
+// Returns array of stream descriptors.
+function probeFile(file) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_streams',
+      '-i', 'pipe:0',
+    ]
+    const ff = spawn('ffprobe', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const torrentStream = file.createReadStream()
+    torrentStream.pipe(ff.stdin)
+    torrentStream.on('error', err => { ff.stdin.end(); console.error('[probe] stream err:', err.message) })
+    ff.stdin.on('error', () => {})
+
+    let stdout = ''
+    let stderr = ''
+    ff.stdout.on('data', d => { stdout += d })
+    ff.stderr.on('data', d => { stderr += d })
+
+    ff.on('error', err => {
+      const msg = err.code === 'ENOENT' ? 'ffprobe not found — install FFmpeg and add to PATH' : err.message
+      reject(new Error(msg))
+    })
+
+    ff.on('close', () => {
+      try {
+        const data = JSON.parse(stdout)
+        const streams = (data.streams || []).map(s => ({
+          index:     s.index,
+          type:      s.codec_type,          // 'audio' | 'video' | 'subtitle' | 'data'
+          codec:     s.codec_name,
+          codecLong: s.codec_long_name || null,
+          language:  s.tags?.language || null,
+          title:     s.tags?.title    || null,
+          default:   s.disposition?.default === 1,
+          forced:    s.disposition?.forced  === 1,
+          channels:  s.channels || null,
+          sampleRate: s.sample_rate || null,
+          bitRate:   s.bit_rate    || null,
+          // subtitle specifics
+          width:     s.width  || null,
+          height:    s.height || null,
+        }))
+        resolve(streams)
+      } catch (e) {
+        // ffprobe sometimes fails when only partial data is available
+        // (torrent still downloading). Return empty gracefully.
+        console.warn('[probe] parse failed:', e.message, '| stderr:', stderr.slice(-200))
+        resolve([])
+      }
+    })
+  })
+}
+
+// Extract a single stream from a torrent file and pipe to the HTTP response.
+// `streamIndex` is the ffprobe stream index (0-based across all streams).
+// `outputArgs` is an array of ffmpeg output flags, e.g. ['-c:a', 'libmp3lame']
+// `outputFormat` is the container format string for -f, e.g. 'mp3'
+function extractStream(file, streamIndex, outputArgs, outputFormat, res, filename) {
+  const args = [
+    '-loglevel', 'error',
+    '-i', 'pipe:0',
+    '-map', `0:${streamIndex}`,
+    ...outputArgs,
+    '-f', outputFormat,
+    'pipe:1',
+  ]
+
+  const ff = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+  const torrentStream = file.createReadStream()
+  torrentStream.pipe(ff.stdin)
+  torrentStream.on('error', err => { ff.stdin.end(); console.error('[extract] stream err:', err.message) })
+  ff.stdin.on('error', () => {})
+
+  ff.on('error', err => {
+    const msg = err.code === 'ENOENT' ? 'FFmpeg not found — install it and add to PATH' : err.message
+    console.error('[extract]', msg)
+    if (!res.headersSent) res.status(500).json({ error: msg })
+  })
+
+  ff.stderr.on('data', d => console.warn('[extract ffmpeg]', d.toString().slice(0, 200)))
+
+  ff.stdout.pipe(res)
+  res.on('close', () => { try { ff.kill('SIGKILL') } catch (_) {} })
+}
+
+// Audio codec → ffmpeg output args + container format + mime type
+const AUDIO_FORMATS = {
+  aac:  { args: ['-c:a', 'aac',         '-b:a', '192k', '-ac', '2'], fmt: 'adts',   mime: 'audio/aac',   ext: 'aac'  },
+  mp3:  { args: ['-c:a', 'libmp3lame',  '-b:a', '192k', '-ac', '2'], fmt: 'mp3',    mime: 'audio/mpeg',  ext: 'mp3'  },
+  flac: { args: ['-c:a', 'flac'],                                     fmt: 'flac',   mime: 'audio/flac',  ext: 'flac' },
+  opus: { args: ['-c:a', 'libopus',     '-b:a', '128k'],              fmt: 'ogg',    mime: 'audio/ogg',   ext: 'opus' },
+  wav:  { args: ['-c:a', 'pcm_s16le'],                                fmt: 'wav',    mime: 'audio/wav',   ext: 'wav'  },
+  // passthrough — keep original codec, remux into matroska
+  copy: { args: ['-c:a', 'copy'],                                     fmt: 'matroska', mime: 'audio/x-matroska', ext: 'mka' },
+}
+
+// Subtitle codec → ffmpeg output args + container format + mime type
+const SUBTITLE_FORMATS = {
+  srt:  { args: ['-c:s', 'subrip'],   fmt: 'srt',  mime: 'text/plain; charset=utf-8',      ext: 'srt' },
+  vtt:  { args: ['-c:s', 'webvtt'],   fmt: 'webvtt', mime: 'text/vtt',                      ext: 'vtt' },
+  ass:  { args: ['-c:s', 'ass'],      fmt: 'ass',  mime: 'text/plain; charset=utf-8',       ext: 'ass' },
+  copy: { args: ['-c:s', 'copy'],     fmt: 'srt',  mime: 'text/plain; charset=utf-8',       ext: 'srt' },
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // IN-MEMORY TTL CACHE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class TTLCache {
@@ -253,11 +423,13 @@ const torrentSearchCache = new TTLCache()
 const tmdbSearchCache    = new TTLCache()
 const tmdbDetailCache    = new TTLCache()
 const tmdbBrowseCache    = new TTLCache()
+const probeCache         = new TTLCache()   // probe results per file
 
 const TORRENT_CACHE_TTL = 10 * 60 * 1000
 const TMDB_SEARCH_TTL   = 30 * 60 * 1000
 const TMDB_DETAIL_TTL   = 6 * 60 * 60 * 1000
 const TMDB_BROWSE_TTL   = 60 * 60 * 1000
+const PROBE_CACHE_TTL   = 60 * 60 * 1000   // probe results valid for 1 hour
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // REQUEST COALESCING
@@ -807,24 +979,46 @@ async function searchYTS(query, limit) {
   } catch (e) { console.log('[yts]', e.message); return [] }
 }
 
-async function searchEZTV(query, limit) {
+async function searchEZTV(query, limit, imdbId = null) {
   try {
-    const r = await fetch(
-      `https://eztv.to/api/get-torrents?limit=${Math.min(limit * 3, 100)}&page=1`,
-      { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) }
-    )
-    const json = await safeJSON(r, 'eztv')
-    if (!json) return []
-    const q = query.toLowerCase()
-    return (json.torrents || [])
-      .filter(t => t.title?.toLowerCase().includes(q) || t.filename?.toLowerCase().includes(q))
-      .slice(0, limit)
-      .map(t => torrentItem({
+    const mapItem = t => {
+      if (!t.hash) return null
+      return torrentItem({
         id: t.hash.toLowerCase(), title: t.title || t.filename || 'Unknown',
         magnet_link: t.magnet_url || buildMagnet(t.hash, t.title),
         size_bytes: parseInt(t.size_bytes) || null, seeders: t.seeds, leechers: t.peers,
         category: 'TV', source: 'eztv', providers: ['eztv'],
-      }))
+      })
+    }
+
+    if (imdbId) {
+      const numericId = String(imdbId).replace(/^tt/i, '')
+      const r = await fetch(
+        `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${Math.min(limit, 100)}`,
+        { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) }
+      )
+      const json = await safeJSON(r, 'eztv')
+      if (!json) return []
+      return (json.torrents || []).map(mapItem).filter(Boolean).slice(0, limit)
+    }
+
+    const q = query.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+    const words = q.split(' ').filter(w => w.length > 1)
+    const pages = [1, 2, 3]
+    const fetches = pages.map(page =>
+      fetch(
+        `https://eztv.re/api/get-torrents?limit=100&page=${page}`,
+        { headers: FETCH_HEADERS, signal: AbortSignal.timeout(12000) }
+      ).then(r => safeJSON(r, 'eztv')).catch(() => null)
+    )
+    const results = await Promise.all(fetches)
+    const all = results.flatMap(json => json?.torrents || [])
+    return all
+      .filter(t => {
+        const hay = (t.title || t.filename || '').toLowerCase()
+        return words.every(w => hay.includes(w))
+      })
+      .map(mapItem).filter(Boolean).slice(0, limit)
   } catch (e) { console.log('[eztv]', e.message); return [] }
 }
 
@@ -845,27 +1039,30 @@ async function searchTorrentsCsv(query, limit) {
   } catch (e) { console.log('[torrents-csv]', e.message); return [] }
 }
 
-const PROXY_PROVIDERS = ['rarbg', 'nyaasi', 'kickass', 'glodls', 'torrentfunk']
+const PROXY_BASE      = 'https://torrent-search-api-murex.vercel.app/api'
+const PROXY_PROVIDERS = ['nyaasi', 'glodls']
 
 async function searchViaProxy(provider, query, limit) {
   try {
-    const url = `https://torrent-search-api-murex.vercel.app/api/${provider}/${encodeURIComponent(query)}/1`
+    const url = `${PROXY_BASE}/${provider}/${encodeURIComponent(query)}/1`
     const r = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(15000) })
     const json = await safeJSON(r, provider)
     if (!json || !Array.isArray(json)) return []
     return json.slice(0, limit).flatMap(item => {
       const magnet     = item.Magnet || item.magnet || ''
-      const name       = item.Name || item.name || item.title || 'Unknown'
+      const name       = item.Name   || item.name   || item.title || 'Unknown'
       const torrentUrl = item.TorrentUrl || item.torrent_url || item.Torrent || item.torrent || ''
       const infoHash   = magnet ? extractInfoHash(magnet) : null
-      if (!infoHash && !magnet && !torrentUrl) return []
+      const id = infoHash || (magnet || null) || torrentUrl || null
+      if (!id) return []
       return [torrentItem({
-        id: infoHash || torrentUrl, title: name,
-        magnet_link: magnet || null, torrent_url: torrentUrl || null,
-        size_bytes: parseSize(item.Size || item.size || ''),
-        seeders: item.Seeders || item.seeders || 0,
-        leechers: item.Leechers || item.leechers || 0,
-        category: item.Category || item.category || null,
+        id, title: name,
+        magnet_link: magnet || null,
+        torrent_url: torrentUrl || null,
+        size_bytes:  parseSize(item.Size || item.size || ''),
+        seeders:     item.Seeders  || item.seeders  || 0,
+        leechers:    item.Leechers || item.leechers || 0,
+        category:    item.Category || item.category || null,
         source: provider, providers: [provider],
         poster: item.Poster || item.poster || null,
       })]
@@ -883,11 +1080,12 @@ function looksLikeMedia(item) {
   return true
 }
 
-async function aggregateTorrents(query, limitPerProvider = 20) {
+async function aggregateTorrents(query, limitPerProvider = 20, { imdbId = null } = {}) {
   const directSearches = [
     searchKnaben(query, limitPerProvider),
     searchPirateBay(query, limitPerProvider),
     searchTorrentsCsv(query, limitPerProvider),
+    searchEZTV(query, limitPerProvider, imdbId),
   ]
   const proxySearches = PROXY_PROVIDERS.map(p => searchViaProxy(p, query, limitPerProvider))
   const settled = await Promise.allSettled([...directSearches, ...proxySearches])
@@ -934,12 +1132,13 @@ app.get('/api/search/torrents', async (req, res) => {
   const page    = Math.max(parseInt(req.query.page) || 1, 1)
   const perPage = Math.min(parseInt(req.query.limit) || 50, 200)
   const sortBy  = req.query.sort || 'health'
-  const cacheKey = `torrents:${q}:${limitPerProvider}`
+  const imdbId   = req.query.imdb_id?.trim() || null
+  const cacheKey = `torrents:${q}:${limitPerProvider}:${imdbId || ''}`
   let allResults = torrentSearchCache.get(cacheKey)
   const wasCached = allResults !== undefined
   if (!allResults) {
     try {
-      allResults = await aggregateTorrents(q, limitPerProvider)
+      allResults = await aggregateTorrents(q, limitPerProvider, { imdbId })
       torrentSearchCache.set(cacheKey, allResults, TORRENT_CACHE_TTL)
     } catch (err) {
       return res.status(500).json({ error: err.message })
@@ -1128,7 +1327,15 @@ app.get('/api/resolve', (req, res) => {
 })
 
 app.get('/api/info', async (req, res) => {
-  const { magnet, infoHash: hashParam, torrent_url } = req.query
+  let { magnet, infoHash: hashParam, torrent_url } = req.query
+  if ((!magnet || magnet === 'magnet:') && req.query.xt) {
+    const hash = req.query.xt.replace(/^urn:btih:/i, '').toLowerCase()
+    if (/^[a-f0-9]{40}$|^[a-z2-7]{32}$/i.test(hash)) {
+      magnet = `magnet:?xt=urn:btih:${hash}`
+      if (req.query.dn) magnet += `&dn=${req.query.dn}`
+      console.log(`[/api/info] Reconstructed magnet from unencoded URL: ${magnet.slice(0, 60)}`)
+    }
+  }
   if (!magnet && !hashParam) return res.status(400).json({ error: 'magnet or infoHash param required' })
 
   res.writeHead(200, {
@@ -1171,7 +1378,14 @@ app.get('/api/info', async (req, res) => {
 })
 
 app.get('/api/stream', async (req, res) => {
-  const { magnet, infoHash: hashParam, torrent_url, file: fileIndexStr } = req.query
+  let { magnet, infoHash: hashParam, torrent_url, file: fileIndexStr } = req.query
+  if ((!magnet || magnet === 'magnet:') && req.query.xt) {
+    const hash = req.query.xt.replace(/^urn:btih:/i, '').toLowerCase()
+    if (/^[a-f0-9]{40}$|^[a-z2-7]{32}$/i.test(hash)) {
+      magnet = `magnet:?xt=urn:btih:${hash}`
+      if (req.query.dn) magnet += `&dn=${req.query.dn}`
+    }
+  }
   if (!magnet && !hashParam) return res.status(400).json({ error: 'infoHash or magnet required' })
 
   try {
@@ -1252,47 +1466,241 @@ app.get('/api/subtitle', async (req, res) => {
 })
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PROBE ENDPOINT
+//
+// GET /api/probe?infoHash=<hash>&file=<index>
+//
+// Runs ffprobe on the torrent file to list all embedded streams.
+// Results are cached for 1 hour per (infoHash, fileIndex) pair.
+//
+// Response:
+// {
+//   infoHash, fileIndex, fileName,
+//   streams: [{
+//     index, type, codec, codecLong, language, title,
+//     default, forced, channels, sampleRate, bitRate,
+//     // audio-only extras above; subtitle extras:
+//     width, height
+//   }],
+//   audioStreams:    [ ...filtered to type === 'audio' ],
+//   subtitleStreams: [ ...filtered to type === 'subtitle' ],
+//   videoStreams:    [ ...filtered to type === 'video' ],
+// }
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.get('/api/probe', async (req, res) => {
+  const { infoHash, file: fileIndexStr } = req.query
+  if (!infoHash) return res.status(400).json({ error: 'infoHash required' })
+
+  const fileIndex = parseInt(fileIndexStr ?? '0', 10)
+  const cacheKey  = `probe:${infoHash}:${fileIndex}`
+  const cached    = probeCache.get(cacheKey)
+  if (cached) return res.json({ ...cached, cached: true })
+
+  try {
+    const torrent = await getOrAdd(infoHash, () => {})
+    resetTTL(torrent.infoHash)
+
+    if (fileIndex < 0 || fileIndex >= torrent.files.length)
+      return res.status(404).json({ error: `File index ${fileIndex} out of range` })
+
+    const file    = torrent.files[fileIndex]
+    const streams = await probeFile(file)
+
+    const payload = {
+      infoHash,
+      fileIndex,
+      fileName:        file.name,
+      fileSize:        file.length,
+      streams,
+      audioStreams:    streams.filter(s => s.type === 'audio'),
+      subtitleStreams: streams.filter(s => s.type === 'subtitle'),
+      videoStreams:    streams.filter(s => s.type === 'video'),
+    }
+
+    probeCache.set(cacheKey, payload, PROBE_CACHE_TTL)
+    res.json({ ...payload, cached: false })
+  } catch (err) {
+    console.error('[/api/probe]', err.message)
+    res.status(err.message.includes('not found') ? 503 : 500).json({ error: err.message })
+  }
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUDIO EXTRACTION ENDPOINT
+//
+// GET /api/extract/audio?infoHash=<hash>&file=<fileIndex>&stream=<streamIndex>&format=<fmt>
+//
+// Parameters:
+//   infoHash  — torrent info hash (required)
+//   file      — torrent file index (default: 0)
+//   stream    — ffprobe stream index to extract (default: first audio stream found)
+//   format    — output format: aac (default) | mp3 | flac | opus | wav | copy
+//
+// The response streams the extracted audio directly.
+// Content-Disposition triggers a browser download with a sensible filename.
+//
+// Example:
+//   /api/extract/audio?infoHash=abc123&file=0&stream=1&format=mp3
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.get('/api/extract/audio', async (req, res) => {
+  const { infoHash, file: fileIndexStr, format = 'aac' } = req.query
+  let   { stream: streamIndexStr } = req.query
+
+  if (!infoHash) return res.status(400).json({ error: 'infoHash required' })
+
+  const fmt = AUDIO_FORMATS[format]
+  if (!fmt) {
+    return res.status(400).json({
+      error: `Unsupported format "${format}". Supported: ${Object.keys(AUDIO_FORMATS).join(', ')}`,
+    })
+  }
+
+  try {
+    const torrent   = await getOrAdd(infoHash, () => {})
+    resetTTL(torrent.infoHash)
+
+    const fileIndex = parseInt(fileIndexStr ?? '0', 10)
+    if (fileIndex < 0 || fileIndex >= torrent.files.length)
+      return res.status(404).json({ error: `File index ${fileIndex} out of range` })
+
+    const file = torrent.files[fileIndex]
+
+    // Resolve stream index — if not supplied, probe and pick the first audio stream
+    let streamIndex
+    if (streamIndexStr !== undefined) {
+      streamIndex = parseInt(streamIndexStr, 10)
+    } else {
+      const cacheKey = `probe:${infoHash}:${fileIndex}`
+      let probeResult = probeCache.get(cacheKey)
+      if (!probeResult) {
+        const streams = await probeFile(file)
+        probeResult = { streams, audioStreams: streams.filter(s => s.type === 'audio') }
+        probeCache.set(cacheKey, {
+          infoHash, fileIndex, fileName: file.name, fileSize: file.length,
+          streams, audioStreams: probeResult.audioStreams,
+          subtitleStreams: streams.filter(s => s.type === 'subtitle'),
+          videoStreams:    streams.filter(s => s.type === 'video'),
+        }, PROBE_CACHE_TTL)
+      }
+      const firstAudio = probeResult.audioStreams?.[0] ?? probeResult.streams?.find(s => s.type === 'audio')
+      if (!firstAudio) return res.status(404).json({ error: 'No audio streams found in this file' })
+      streamIndex = firstAudio.index
+    }
+
+    const baseName    = file.name.replace(/\.[^.]+$/, '')
+    const outFilename = `${baseName}_audio_stream${streamIndex}.${fmt.ext}`
+
+    console.log(`[extract/audio] "${file.name}" stream=${streamIndex} format=${format}`)
+
+    res.setHeader('Content-Type', fmt.mime)
+    res.setHeader('Content-Disposition', `attachment; filename="${outFilename}"`)
+    res.setHeader('Transfer-Encoding', 'chunked')
+    res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Access-Control-Allow-Origin', '*')
+
+    extractStream(file, streamIndex, fmt.args, fmt.fmt, res, outFilename)
+  } catch (err) {
+    console.error('[/api/extract/audio]', err.message)
+    if (!res.headersSent) res.status(err.message.includes('not found') ? 503 : 500).json({ error: err.message })
+  }
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SUBTITLE EXTRACTION ENDPOINT
+//
+// GET /api/extract/subtitle?infoHash=<hash>&file=<fileIndex>&stream=<streamIndex>&format=<fmt>
+//
+// Parameters:
+//   infoHash  — torrent info hash (required)
+//   file      — torrent file index (default: 0)
+//   stream    — ffprobe stream index to extract (default: first subtitle stream)
+//   format    — output format: srt (default) | vtt | ass | copy
+//
+// Embedded subtitles (e.g. in MKV) are extracted on-the-fly.
+// The response is plain text / WebVTT suitable for use as a <track> src.
+//
+// Example:
+//   /api/extract/subtitle?infoHash=abc123&file=0&stream=3&format=vtt
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.get('/api/extract/subtitle', async (req, res) => {
+  const { infoHash, file: fileIndexStr, format = 'srt' } = req.query
+  let   { stream: streamIndexStr } = req.query
+
+  if (!infoHash) return res.status(400).json({ error: 'infoHash required' })
+
+  const fmt = SUBTITLE_FORMATS[format]
+  if (!fmt) {
+    return res.status(400).json({
+      error: `Unsupported format "${format}". Supported: ${Object.keys(SUBTITLE_FORMATS).join(', ')}`,
+    })
+  }
+
+  try {
+    const torrent   = await getOrAdd(infoHash, () => {})
+    resetTTL(torrent.infoHash)
+
+    const fileIndex = parseInt(fileIndexStr ?? '0', 10)
+    if (fileIndex < 0 || fileIndex >= torrent.files.length)
+      return res.status(404).json({ error: `File index ${fileIndex} out of range` })
+
+    const file = torrent.files[fileIndex]
+
+    // Resolve stream index
+    let streamIndex
+    if (streamIndexStr !== undefined) {
+      streamIndex = parseInt(streamIndexStr, 10)
+    } else {
+      const cacheKey = `probe:${infoHash}:${fileIndex}`
+      let probeResult = probeCache.get(cacheKey)
+      if (!probeResult) {
+        const streams = await probeFile(file)
+        probeResult = {
+          streams,
+          subtitleStreams: streams.filter(s => s.type === 'subtitle'),
+          audioStreams:    streams.filter(s => s.type === 'audio'),
+        }
+        probeCache.set(cacheKey, {
+          infoHash, fileIndex, fileName: file.name, fileSize: file.length,
+          streams, ...probeResult,
+          videoStreams: streams.filter(s => s.type === 'video'),
+        }, PROBE_CACHE_TTL)
+      }
+      const firstSub = probeResult.subtitleStreams?.[0] ?? probeResult.streams?.find(s => s.type === 'subtitle')
+      if (!firstSub) return res.status(404).json({ error: 'No subtitle streams found in this file' })
+      streamIndex = firstSub.index
+    }
+
+    const baseName    = file.name.replace(/\.[^.]+$/, '')
+    const outFilename = `${baseName}_sub_stream${streamIndex}.${fmt.ext}`
+
+    console.log(`[extract/subtitle] "${file.name}" stream=${streamIndex} format=${format}`)
+
+    res.setHeader('Content-Type', fmt.mime)
+    res.setHeader('Content-Disposition', `attachment; filename="${outFilename}"`)
+    res.setHeader('Transfer-Encoding', 'chunked')
+    res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Access-Control-Allow-Origin', '*')
+
+    extractStream(file, streamIndex, fmt.args, fmt.fmt, res, outFilename)
+  } catch (err) {
+    console.error('[/api/extract/subtitle]', err.message)
+    if (!res.headersSent) res.status(err.message.includes('not found') ? 503 : 500).json({ error: err.message })
+  }
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // OPENSUBTITLES INTEGRATION
-//
-// Source: OpenSubtitles.com REST API (api.opensubtitles.com)
-// Auth:   Api-Key header only (no login needed for search+download)
-//         Free tier: 5 downloads/day anonymous, 20/day with free account.
-//         Set OPENSUBTITLES_API_KEY env var (get one free at opensubtitles.com)
-//
-// FLOW:
-//   1. GET  /api/v1/subtitles?query=…&languages=en&tmdb_id=…  → list of results
-//   2. POST /api/v1/download  { file_id }                      → temp download link
-//   3. GET  {link}                                             → the .srt content
-//
-// ENDPOINTS ADDED:
-//   GET  /api/subtitles/search   — search OpenSubtitles
-//   GET  /api/subtitles/download — proxy subtitle content (avoids browser CORS)
-//
-// SEARCH PARAMS:
-//   ?query=       movie/show title (required if no tmdb_id/imdb_id)
-//   ?tmdb_id=     TMDB ID (most accurate)
-//   ?imdb_id=     IMDb ID (e.g. tt1375666 or just 1375666)
-//   ?season=      TV season number
-//   ?episode=     TV episode number
-//   ?languages=   comma-sep ISO 639-1 codes, default "en" (e.g. "en,fr,es")
-//   ?type=        "movie" | "episode" | "all" (default: all)
-//
-// DOWNLOAD PARAMS:
-//   ?file_id=     OpenSubtitles file_id from search results (required)
-//   ?format=      "srt" | "vtt" (default: srt — server converts to VTT if needed)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const OS_API_KEY  = process.env.OPENSUBTITLES_API_KEY || 'vQLTlPHCpMzRzHOesjpbijBtjWa0P1Zi'
 const OS_BASE     = 'https://api.opensubtitles.com/api/v1'
-const OS_APP      = 'TorrentStreamServer v1.0'  // shown in OS developer dashboard
+const OS_APP      = 'TorrentStreamServer v1.0'
 
-// In-memory caches
-const osSearchCache   = new TTLCache()  // search results: 30 min
-const osLinkCache     = new TTLCache()  // download links: 4 min (links expire ~10min)
+const osSearchCache   = new TTLCache()
+const osLinkCache     = new TTLCache()
 const OS_SEARCH_TTL   = 30 * 60 * 1000
 const OS_LINK_TTL     = 4 * 60 * 1000
 
-// Build consistent OS request headers
 function osHeaders(withAuth = false) {
   const h = {
     'Api-Key':      OS_API_KEY || 'undefined',
@@ -1300,12 +1708,9 @@ function osHeaders(withAuth = false) {
     'Accept':       'application/json',
     'User-Agent':   OS_APP,
   }
-  // If you have a user JWT token (from /login), add it here:
-  // if (withAuth && OS_TOKEN) h['Authorization'] = `Bearer ${OS_TOKEN}`
   return h
 }
 
-// Search OpenSubtitles and return our normalised shape
 async function searchOpenSubtitles({ query, tmdb_id, imdb_id, season, episode, languages = 'en', type }) {
   const cacheKey = `os:${query}:${tmdb_id}:${imdb_id}:${season}:${episode}:${languages}:${type}`
   const cached = osSearchCache.get(cacheKey)
@@ -1314,27 +1719,21 @@ async function searchOpenSubtitles({ query, tmdb_id, imdb_id, season, episode, l
   return coalesce(cacheKey, async () => {
     const url = new URL(`${OS_BASE}/subtitles`)
 
-    // Identifiers — prefer tmdb_id > imdb_id > query text
     if (tmdb_id)  url.searchParams.set('tmdb_id', String(tmdb_id))
     if (imdb_id) {
-      // Strip leading 'tt' if present
       url.searchParams.set('imdb_id', String(imdb_id).replace(/^tt/i, ''))
     }
     if (query)    url.searchParams.set('query', query)
 
-    // TV specifics
     if (season)   url.searchParams.set('season_number', String(season))
     if (episode)  url.searchParams.set('episode_number', String(episode))
 
-    // Language filter — OS uses comma-separated ISO 639-1 (en,fr,es)
     url.searchParams.set('languages', languages)
 
-    // Type filter
     if (type && type !== 'all') {
-      url.searchParams.set('type', type)  // 'movie' or 'episode'
+      url.searchParams.set('type', type)
     }
 
-    // Sort by download count so most-used subs appear first
     url.searchParams.set('order_by', 'download_count')
     url.searchParams.set('order_direction', 'desc')
 
@@ -1357,7 +1756,7 @@ async function searchOpenSubtitles({ query, tmdb_id, imdb_id, season, episode, l
         const feat  = attr.feature_details || {}
         return {
           subtitle_id:      item.id,
-          file_id:          files[0]?.file_id ?? null,    // required for /download
+          file_id:          files[0]?.file_id ?? null,
           file_name:        files[0]?.file_name ?? null,
           language:         attr.language,
           language_name:    LANG_NAMES[attr.language] || attr.language,
@@ -1377,7 +1776,7 @@ async function searchOpenSubtitles({ query, tmdb_id, imdb_id, season, episode, l
           uploader_rank:    attr.uploader?.rank || null,
           feature_title:    feat.title || feat.movie_name || null,
           feature_year:     feat.year || null,
-          feature_type:     feat.feature_type || null,    // 'Movie' | 'Episode' | 'Tvshow'
+          feature_type:     feat.feature_type || null,
           season:           feat.season_number ?? null,
           episode:          feat.episode_number ?? null,
           imdb_id:          feat.imdb_id ? `tt${String(feat.imdb_id).padStart(7, '0')}` : null,
@@ -1395,8 +1794,6 @@ async function searchOpenSubtitles({ query, tmdb_id, imdb_id, season, episode, l
   })
 }
 
-// Get a time-limited download URL from OpenSubtitles for a given file_id
-// The link expires in ~10 minutes — we cache it for 4 min to allow retries
 async function getOsDownloadLink(file_id) {
   const cacheKey = `os-link:${file_id}`
   const cached = osLinkCache.get(cacheKey)
@@ -1421,23 +1818,21 @@ async function getOsDownloadLink(file_id) {
   const result = {
     link:       json.link,
     file_name:  json.file_name,
-    remaining:  json.remaining,   // downloads left today
-    reset_time: json.reset_time,  // UTC reset time
+    remaining:  json.remaining,
+    reset_time: json.reset_time,
   }
 
   osLinkCache.set(cacheKey, result, OS_LINK_TTL)
   return result
 }
 
-// Convert SRT text → WebVTT text (server-side, so client gets VTT directly)
 function srtToVtt(srt) {
   return 'WEBVTT\n\n' + srt
     .replace(/\r\n/g, '\n')
-    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')  // timestamps: , → .
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
     .trim()
 }
 
-// Human-readable language names for common ISO 639-1 codes
 const LANG_NAMES = {
   en: 'English', fr: 'French', de: 'German', es: 'Spanish', it: 'Italian',
   pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', ru: 'Russian', zh: 'Chinese',
@@ -1449,31 +1844,6 @@ const LANG_NAMES = {
   'zh-tw': 'Chinese (Traditional)',
 }
 
-// ── ROUTE: Search OpenSubtitles ───────────────────────────────────────────────
-//
-// GET /api/subtitles/search
-//   ?query=       text search (required if no tmdb_id/imdb_id)
-//   ?tmdb_id=     TMDB ID (most accurate, use from TMDB search results)
-//   ?imdb_id=     IMDb ID  (tt-prefixed or numeric)
-//   ?season=      TV season number
-//   ?episode=     TV episode number
-//   ?languages=   comma-sep codes, default "en"
-//   ?type=        "movie" | "episode" | "all"
-//
-// Response:
-// {
-//   query, total, cached,
-//   results: [{
-//     subtitle_id, file_id, file_name,
-//     language, language_name,
-//     download_count, hearing_impaired, hd,
-//     from_trusted, ai_translated, machine_translated,
-//     release, upload_date, uploader, uploader_rank,
-//     feature_title, feature_year, feature_type,
-//     season, episode, imdb_id, tmdb_id, url
-//   }]
-// }
-// ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/subtitles/search', async (req, res) => {
   const { query, tmdb_id, imdb_id, season, episode, type } = req.query
   const languages = req.query.languages || 'en'
@@ -1513,19 +1883,6 @@ app.get('/api/subtitles/search', async (req, res) => {
   }
 })
 
-// ── ROUTE: Download / proxy a subtitle file ───────────────────────────────────
-//
-// GET /api/subtitles/download
-//   ?file_id=   OpenSubtitles file_id (from search results)
-//   ?format=    "srt" (default) or "vtt" (server converts)
-//
-// Returns the subtitle file content as text/plain or text/vtt.
-// We proxy it server-side so the client avoids CORS issues with the
-// time-limited OpenSubtitles CDN URLs.
-//
-// Rate limits (free tier): 5 downloads/day without account, 20/day with account.
-// Set OPENSUBTITLES_API_KEY to use your account's quota.
-// ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/subtitles/download', async (req, res) => {
   const { file_id, format = 'srt' } = req.query
   if (!file_id) return res.status(400).json({ error: 'file_id required' })
@@ -1537,10 +1894,8 @@ app.get('/api/subtitles/download', async (req, res) => {
   }
 
   try {
-    // Step 1: get time-limited download link
     const linkData = await getOsDownloadLink(file_id)
 
-    // Step 2: fetch the actual subtitle content
     const r = await fetch(linkData.link, {
       headers: { 'User-Agent': OS_APP },
       signal: AbortSignal.timeout(15000),
@@ -1550,7 +1905,6 @@ app.get('/api/subtitles/download', async (req, res) => {
     let content = await r.text()
     const asVtt = format === 'vtt'
 
-    // Convert SRT → VTT if requested
     if (asVtt && !content.trimStart().startsWith('WEBVTT')) {
       content = srtToVtt(content)
     }
@@ -1567,13 +1921,7 @@ app.get('/api/subtitles/download', async (req, res) => {
   }
 })
 
-// ── ROUTE: Subtitle quota status ─────────────────────────────────────────────
-// GET /api/subtitles/quota
-// Returns remaining daily downloads from the last /download call response.
-// (We can't query OS for quota directly without login; this shows cached data.)
 app.get('/api/subtitles/quota', (req, res) => {
-  // Pull last known remaining value from any cached link
-  // This is best-effort — only accurate after at least one download
   res.json({
     api_key_configured: !!OS_API_KEY,
     note: 'Free tier: 5 downloads/day without account, 20/day with free account. Check X-OS-Remaining header on /api/subtitles/download responses.',
@@ -1605,6 +1953,7 @@ app.get('/api/health', (req, res) => res.json({
     torrentSearch: torrentSearchCache.stats(), tmdbSearch: tmdbSearchCache.stats(),
     tmdbDetail: tmdbDetailCache.stats(), tmdbBrowse: tmdbBrowseCache.stats(),
     osSearch: osSearchCache.stats(), osLinks: osLinkCache.stats(),
+    probe: probeCache.stats(),
     inFlight: inFlight.size,
   },
 }))
@@ -1618,6 +1967,9 @@ app.post('/api/cache/flush', (req, res) => {
   if (target === 'subtitles' || target === 'all') {
     osSearchCache.flush(); osLinkCache.flush()
   }
+  if (target === 'probe' || target === 'all') {
+    probeCache.flush()
+  }
   res.json({ ok: true, flushed: target })
 })
 
@@ -1628,17 +1980,32 @@ app.post('/api/cache/flush', (req, res) => {
 app.get('/api/hls/:infoHash/:fileIndex/master.m3u8', async (req, res) => {
   const { infoHash, fileIndex } = req.params
   try {
-    await getOrStartHlsSession(infoHash, parseInt(fileIndex))
-    const master = [
-      '#EXTM3U',
-      '#EXT-X-VERSION:3',
-      `#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.42E01E,mp4a.40.2"`,
-      `stream.m3u8`,
-    ].join('\n')
+    const session = await getOrStartHlsSession(infoHash, parseInt(fileIndex))
+    const audioStreams = session.audioStreams || []
+    const lines = ['#EXTM3U', '#EXT-X-VERSION:3']
+
+    if (audioStreams.length > 1) {
+      // Audio track 0 is embedded in stream.m3u8 — declare it as default
+      audioStreams.forEach((s, i) => {
+        const lang      = s.language || 'und'
+        const name      = s.title || (s.language ? s.language.toUpperCase() : `Track ${i + 1}`)
+        const isDefault = i === 0 ? 'YES' : 'NO'
+        // Track 0 lives inside the main video segments; tracks 1+ have separate playlists
+        const uri = i === 0 ? 'stream.m3u8' : `audio${i}.m3u8`
+        lines.push(
+          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="${lang}",NAME="${name}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="${uri}"`
+        )
+      })
+      lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.42E01E,mp4a.40.2",AUDIO="audio"`)
+    } else {
+      lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.42E01E,mp4a.40.2"`)
+    }
+
+    lines.push('stream.m3u8')
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.send(master)
+    res.send(lines.join('\n'))
   } catch (err) {
     console.error('[hls master]', err.message)
     res.status(500).json({ error: err.message })
@@ -1655,6 +2022,37 @@ app.get('/api/hls/:infoHash/:fileIndex/stream.m3u8', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store')
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.sendFile(session.playlistPath)
+})
+
+// Serve extra audio-only playlists: audio1.m3u8, audio2.m3u8 …
+app.get('/api/hls/:infoHash/:fileIndex/audio:trackNum.m3u8', (req, res) => {
+  const { infoHash, fileIndex, trackNum } = req.params
+  const key = hlsSessionKey(infoHash, fileIndex)
+  resetHlsTTL(key)
+  const session = hlsSessions.get(key)
+  if (!session?.ready) return res.status(404).json({ error: 'Session not ready' })
+  const playlistPath = join(session.dir, `audio${trackNum}.m3u8`)
+  if (!existsSync(playlistPath)) return res.status(404).end()
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+  res.setHeader('Cache-Control', 'no-cache, no-store')
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.sendFile(playlistPath)
+})
+
+// Serve extra audio-only segments: audio1/seg00000.ts …
+app.get('/api/hls/:infoHash/:fileIndex/audio:trackNum/:segment', (req, res) => {
+  const { infoHash, fileIndex, trackNum, segment } = req.params
+  if (!segment.endsWith('.ts')) return res.status(400).end()
+  const key = hlsSessionKey(infoHash, fileIndex)
+  resetHlsTTL(key)
+  const session = hlsSessions.get(key)
+  if (!session) return res.status(404).end()
+  const segPath = join(session.dir, `audio${trackNum}`, segment)
+  if (!existsSync(segPath)) return res.status(404).end()
+  res.setHeader('Content-Type', 'video/mp2t')
+  res.setHeader('Cache-Control', 'public, max-age=3600')
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.sendFile(segPath)
 })
 
 app.get('/api/hls/:infoHash/:fileIndex/:segment', (req, res) => {
