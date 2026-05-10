@@ -123,4 +123,4 @@ latest.yml
 
 
 ffmpeg/
-streamer/public/
+streamer/public/.claude/settings.local.json

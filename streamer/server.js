@@ -1,3 +1,5 @@
+// Must be the first import — patches global.fetch before bittorrent-tracker loads
+import './patch-fetch.js'
 import express from 'express'
 import cors from 'cors'
 import WebTorrent from 'webtorrent'
@@ -54,6 +56,77 @@ function destroyHlsSession(key) {
   try { if (existsSync(session.dir)) rmSync(session.dir, { recursive: true, force: true }) } catch (_) {}
   clearTimeout(session.timer)
   hlsSessions.delete(key)
+}
+
+// ── Hardware encoder detection ────────────────────────────────────────────────
+// Priority: nvenc (NVIDIA) → vaapi (Intel/AMD on Linux) → qsv (Intel QSV) → software
+// Override with HLS_HW_ENCODER=nvenc|vaapi|qsv|software
+let _hwEncoderCache = null
+
+// Functional test — encodes one synthetic frame to confirm the encoder actually works.
+// Checking `ffmpeg -encoders` is not enough: an encoder can be compiled in while its
+// GPU driver is absent, causing ffmpeg to fail silently when a real encode starts.
+function testEncoder(extraArgs) {
+  return new Promise(resolve => {
+    const args = [
+      '-v', 'error',
+      '-f', 'lavfi', '-i', 'color=c=black:s=16x16:r=1',
+      '-frames:v', '1',
+      ...extraArgs,
+      '-f', 'null', '-',
+    ]
+    const ff = spawn(process.env.FFMPEG_PATH, args, { stdio: 'ignore' })
+    const timer = setTimeout(() => { try { ff.kill() } catch (_) {}; resolve(false) }, 5000)
+    ff.on('close', code => { clearTimeout(timer); resolve(code === 0) })
+    ff.on('error', () => { clearTimeout(timer); resolve(false) })
+  })
+}
+
+async function detectHwEncoder() {
+  if (_hwEncoderCache !== null) return _hwEncoderCache
+  if (process.env.HLS_HW_ENCODER) {
+    _hwEncoderCache = process.env.HLS_HW_ENCODER
+    console.log(`[hls] using encoder from env: ${_hwEncoderCache}`)
+    return _hwEncoderCache
+  }
+
+  const device = process.env.VAAPI_DEVICE || '/dev/dri/renderD128'
+  const candidates = [
+    { name: 'nvenc', args: ['-c:v', 'h264_nvenc'] },
+    { name: 'vaapi', args: ['-vaapi_device', device, '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi'] },
+    { name: 'qsv',   args: ['-c:v', 'h264_qsv'] },
+  ]
+
+  for (const { name, args } of candidates) {
+    if (await testEncoder(args)) {
+      _hwEncoderCache = name
+      console.log(`[hls] hardware encoder available: ${name}`)
+      return _hwEncoderCache
+    }
+  }
+
+  _hwEncoderCache = 'software'
+  console.log('[hls] no hardware encoder found, using libx264')
+  return _hwEncoderCache
+}
+
+function buildVideoCodecArgs(encoder) {
+  switch (encoder) {
+    case 'nvenc':
+      // NVIDIA NVENC — software decode, GPU encode
+      return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '23', '-pix_fmt', 'yuv420p']
+    case 'vaapi': {
+      // VA-API — software decode, upload to GPU, encode (Intel/AMD)
+      const device = process.env.VAAPI_DEVICE || '/dev/dri/renderD128'
+      return ['-vaapi_device', device, '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '23']
+    }
+    case 'qsv':
+      // Intel Quick Sync Video
+      return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23', '-pix_fmt', 'nv12']
+    default:
+      // Software fallback
+      return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
+  }
 }
 
 async function getOrStartHlsSession(infoHash, fileIndex) {
@@ -151,7 +224,7 @@ async function getOrStartHlsSession(infoHash, fileIndex) {
     }
   }
 
-  const videoCodecArgs = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
+  const videoCodecArgs = buildVideoCodecArgs(await detectHwEncoder())
   const ffmpegArgs = ['-loglevel', 'warning', '-i', 'pipe:0']
 
   if (multiAudio) {
@@ -174,7 +247,7 @@ async function getOrStartHlsSession(infoHash, fileIndex) {
     for (let i = 1; i < audioStreams.length; i++) {
       const s = audioStreams[i]
       ffmpegArgs.push('-map', `0:a:${i}`)
-      ffmpegArgs.push(`-c:a:0`, 'aac', `-b:a:0`, '192k', `-ac:a:0`, '2')
+      ffmpegArgs.push('-c:a:0', 'aac', '-b:a:0', '192k', '-ac:a:0', '2')
       if (s.language) ffmpegArgs.push('-metadata:s:a:0', `language=${s.language}`)
       if (s.title)    ffmpegArgs.push('-metadata:s:a:0', `title=${s.title}`)
       ffmpegArgs.push(
@@ -462,13 +535,30 @@ function healthScore(seeders, leechers) {
 // TRACKERS / MAGNET HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const EXTRA_TRACKERS = [
+  // HTTP(S) trackers — TCP-based, work even when ISP/firewall blocks UDP
+  // HTTP(S) trackers — TCP-based, work even when ISP/firewall blocks UDP
+  'http://tracker.opentrackr.org:1337/announce',
+  'https://tracker.lilithraws.org:443/announce',
+  'http://t.nyaatracker.com:80/announce',
+  'http://tracker2.dler.org:80/announce',
+  'http://bvarf.tracker.sh:2086/announce',
+  'http://tracker.mywaifu.best:6969/announce',
+  'https://tracker1.520.jp:443/announce',
+  'https://tracker.tamersunion.org:443/announce',
+  // UDP trackers — faster when available
   'udp://tracker.opentrackr.org:1337/announce',
   'udp://open.tracker.cl:1337/announce',
   'udp://tracker.openbittorrent.com:6969/announce',
   'udp://open.stealth.si:80/announce',
-  'https://tracker.tamersunion.org:443/announce',
   'udp://exodus.desync.com:6969/announce',
   'udp://tracker.torrent.eu.org:451/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://tracker.tiny-vps.com:6969/announce',
+  'udp://tracker.moeking.me:6969/announce',
+  'udp://p4p.arenabg.com:1337/announce',
+  // WebSocket trackers — for WebTorrent WebRTC peers
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.btorrent.xyz',
 ]
 
 function buildMagnet(infoHash, name = '') {
@@ -564,7 +654,9 @@ async function fetchTorrentBuffer(infoHash, sendStatus) {
     try {
       sendStatus(`Fetching metadata from ${new URL(url).hostname}…`)
       const buf = await fetchBuffer(url)
-      if (buf && buf.length > 200) { console.log(`[meta] ${buf.length}b from ${url}`); return buf }
+      // A valid .torrent is bencoded — it must start with 'd' (0x64). Reject HTML/error pages.
+      if (buf && buf.length > 200 && buf[0] === 0x64) { console.log(`[meta] ${buf.length}b from ${url}`); return buf }
+      if (buf) console.log(`[meta] ${new URL(url).hostname}: invalid torrent data (starts with 0x${buf[0]?.toString(16) ?? '??'})`)
     } catch (e) { console.log(`[meta] ${new URL(url).hostname}: ${e.message}`) }
   }
   return null
@@ -616,15 +708,21 @@ async function getOrAdd(hashOrMagnet, sendStatus, torrentUrl = null) {
   if (!buf && infoHash) buf = await fetchTorrentBuffer(infoHash, sendStatus)
 
   sendStatus('Connecting to BitTorrent swarm…')
+  // Always use buildMagnet() so trackers are included — a bare magnet with no
+  // trackers relies solely on DHT which is slow and often fails for less popular torrents
   const input = buf
-    || (hashOrMagnet.startsWith('magnet:') ? hashOrMagnet
-    : infoHash ? `magnet:?xt=urn:btih:${infoHash}`
-    : null)
+    || (infoHash ? buildMagnet(infoHash, '') : null)
+    || (hashOrMagnet.startsWith('magnet:') ? hashOrMagnet : null)
 
   if (!input) throw new Error('No magnet, infoHash, or .torrent available')
 
-  const torrent = getClient().add(input, { strategy: 'sequential', 
-    store: MemoryChunkStore,   })
+  // Pass trackers explicitly — magnet URI parsing alone may not pick them all up
+  const torrent = getClient().add(input, {
+    strategy: 'sequential',
+    announce: EXTRA_TRACKERS,
+  })
+  torrent.on('warning', w => console.log(`[wt-warn] ${w.message || w}`))
+  torrent.on('error', e => console.log(`[wt-err] ${e.message}`))
   const hb = buf ? null : setInterval(() => sendStatus(`Fetching metadata… ${torrent.numPeers} peers`), 4000)
   try {
     await waitReady(torrent)
@@ -636,6 +734,13 @@ async function getOrAdd(hashOrMagnet, sendStatus, torrentUrl = null) {
   }
 
   const h = torrent.infoHash
+  // Log tracker status to help diagnose peer connection failures
+  if (torrent.discovery?.tracker?._trackers) {
+    for (const tr of torrent.discovery.tracker._trackers) {
+      tr.on('warning', w => console.log(`[tracker] ${tr.announceUrl} warn: ${w.message || w}`))
+      tr.on('update', r => console.log(`[tracker] ${tr.announceUrl} seeds=${r.complete} leech=${r.incomplete}`))
+    }
+  }
   console.log(`[ready] "${torrent.name}" peers=${torrent.numPeers}`)
   console.log(`[files] ${torrent.files.map((f, i) => `[${i}] ${f.name} (${(f.length / 1e6).toFixed(1)}MB)`).join(' | ')}`)
   torrents.set(h, { torrent, timer: null, addedAt: Date.now() })
@@ -1125,7 +1230,7 @@ function looksLikeMedia(item) {
 
 async function aggregateTorrents(query, limitPerProvider = 20, { imdbId = null } = {}) {
   const directSearches = [
-    searchKnaben(query, limitPerProvider),
+    // searchKnaben(query, limitPerProvider),
     searchPirateBay(query, limitPerProvider),
     searchTorrentsCsv(query, limitPerProvider),
     searchEZTV(query, limitPerProvider, imdbId),
@@ -1196,7 +1301,7 @@ app.get('/api/search/torrents', async (req, res) => {
   res.json({
     query: q, total: sorted.length, page, per_page: perPage,
     total_pages: Math.ceil(sorted.length / perPage),
-    providers_queried: ['knaben', 'piratebay', 'yts', 'eztv', 'torrents-csv', 'torrentio', ...PROXY_PROVIDERS],
+    providers_queried: ['piratebay', 'yts', 'eztv', 'torrents-csv', 'torrentio', ...PROXY_PROVIDERS],
     cached: wasCached, results: paged,
   })
 })
@@ -1437,7 +1542,7 @@ app.get('/api/stream', async (req, res) => {
     resetTTL(torrent.infoHash)
 
     if (torrent.numPeers === 0) {
-      try { await waitForPeers(torrent, 30_000, () => {}) } catch (_) {
+      try { await waitForPeers(torrent, 45_000, () => {}) } catch (_) {
         return res.status(503).json({ error: 'No peers available — try again shortly' })
       }
     }
@@ -2034,10 +2139,12 @@ app.get('/api/hls/:infoHash/:fileIndex/master.m3u8', async (req, res) => {
         const lang      = s.language || 'und'
         const name      = s.title || (s.language ? s.language.toUpperCase() : `Track ${i + 1}`)
         const isDefault = i === 0 ? 'YES' : 'NO'
-        // Track 0 lives inside the main video segments; tracks 1+ have separate playlists
-        const uri = i === 0 ? 'stream.m3u8' : `audio${i}.m3u8`
+        // Track 0 is embedded in the video segments — RFC 8216 says URI must be omitted
+        // for renditions whose media is carried in the variant stream itself.
+        // Tracks 1+ have separate audio-only playlists, so they get a URI.
+        const uriAttr = i === 0 ? '' : `,URI="audio${i}.m3u8"`
         lines.push(
-          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="${lang}",NAME="${name}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="${uri}"`
+          `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="${lang}",NAME="${name}",DEFAULT=${isDefault},AUTOSELECT=${isDefault}${uriAttr}`
         )
       })
       lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="avc1.42E01E,mp4a.40.2",AUDIO="audio"`)
